@@ -1,0 +1,242 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <meta name="mobile-web-app-capable" content="yes"/>
+  <meta name="apple-mobile-web-app-capable" content="yes"/>
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"/>
+  <title>Galaxy Heart</title>
+  <style>
+    *{margin:0;padding:0;box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+    html,body{width:100%;height:100%;background:#000;overflow:hidden;position:fixed}
+    body{display:flex;align-items:center;justify-content:center}
+    canvas{display:block;touch-action:none;-webkit-touch-callout:none;-webkit-user-select:none;
+      user-select:none;position:fixed;top:0;left:0;width:100%;height:100%}
+    .label{position:fixed;top:max(30px,env(safe-area-inset-top,30px));left:50%;
+      transform:translateX(-50%);color:rgba(180,120,255,0.85);font-family:"Courier New",monospace;
+      font-size:clamp(11px,3vw,15px);letter-spacing:6px;text-transform:uppercase;
+      white-space:nowrap;pointer-events:none;text-shadow:0 0 12px rgba(180,120,255,0.6)}
+    .hint{position:fixed;bottom:max(35px,env(safe-area-inset-bottom,35px));left:50%;
+      transform:translateX(-50%);color:rgba(180,120,255,0.55);font-family:"Courier New",monospace;
+      font-size:clamp(10px,2.5vw,13px);letter-spacing:4px;pointer-events:none;
+      white-space:nowrap;animation:blink 1.8s ease-in-out infinite}
+    @keyframes blink{0%,100%{opacity:0.2}50%{opacity:1}}
+  </style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div class="label">Galaxy Heart</div>
+<div class="hint">tap to spiral ✦</div>
+<script>
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d', { alpha: false });
+
+let W, H, t = 0;
+let particles = [];
+let animId;
+
+const isMobile = /Mobi|Android|iPhone|iPad/i.test(navigator.userAgent);
+
+// Key optimization: fewer particles, shorter trails, NO shadowBlur per particle
+const NUM       = isMobile ? 320 : 520;
+const MAX_TRAIL = isMobile ? 5   : 9;
+
+// ── Heart math ────────────────────────────────────────────────
+function heartXY(angle, scale) {
+  const s = Math.sin(angle);
+  const x = 16 * s * s * s;
+  const y = -(13*Math.cos(angle) - 5*Math.cos(2*angle) - 2*Math.cos(3*angle) - Math.cos(4*angle));
+  return { x: x * scale, y: y * scale };
+}
+
+// ── Pre-computed glow sprite (drawn once, reused) ─────────────
+let glowSprite = null;
+let glowSize   = 0;
+
+function buildGlowSprite() {
+  const r  = 18;
+  const oc = document.createElement('canvas');
+  oc.width = oc.height = r * 2;
+  const ox = oc.getContext('2d');
+  const g  = ox.createRadialGradient(r, r, 0, r, r, r);
+  g.addColorStop(0,   'rgba(220,180,255,0.9)');
+  g.addColorStop(0.3, 'rgba(180,120,255,0.4)');
+  g.addColorStop(1,   'rgba(100,50,255,0)');
+  ox.fillStyle = g;
+  ox.fillRect(0, 0, r*2, r*2);
+  glowSprite = oc;
+  glowSize   = r;
+}
+
+// ── Particle class ────────────────────────────────────────────
+class Star {
+  constructor(i, total) {
+    this.i     = i;
+    this.total = total;
+    this.reset(true);
+  }
+
+  reset(firstInit) {
+    const scale = Math.min(W, H) * 0.024;
+    const angle = (this.i / this.total) * Math.PI * 2;
+    const hp    = heartXY(angle, scale);
+    this.tx = W/2 + hp.x;
+    this.ty = H/2 + hp.y;
+
+    const sa = Math.random() * Math.PI * 2;
+    const sr = Math.random() * Math.min(W, H) * (firstInit ? 0.35 : 0.4);
+    this.x   = W/2 + Math.cos(sa) * sr;
+    this.y   = H/2 + Math.sin(sa) * sr;
+    this.vx  = 0;
+    this.vy  = 0;
+
+    // Use integer hue for cheaper string building
+    this.hue  = (220 + Math.random() * 140) | 0;
+    this.size = 0.7 + Math.random() * 1.8;
+    this.trail        = [];
+    this.isSpiraling  = false;
+    this.spiralAngle  = 0;
+    this.spiralR      = 0;
+    this.spiralSpeed  = (Math.random() > 0.5 ? 1 : -1) * (0.04 + Math.random() * 0.06);
+    this.spiralLife   = 0;
+    this.floatOffset  = Math.random() * Math.PI * 2;
+  }
+
+  triggerSpiral() {
+    this.isSpiraling = true;
+    this.spiralLife  = 1;
+    this.spiralAngle = Math.atan2(this.y - H/2, this.x - W/2);
+    this.spiralR     = Math.hypot(this.x - W/2, this.y - H/2);
+  }
+
+  update(time) {
+    // Push trail (limit array growth)
+    if (this.trail.length >= MAX_TRAIL) this.trail.shift();
+    this.trail.push({ x: this.x, y: this.y });
+
+    if (this.isSpiraling) {
+      this.spiralAngle += this.spiralSpeed;
+      this.spiralR     += 2.5;
+      this.spiralLife  -= 0.007;
+      if (this.spiralLife <= 0) {
+        this.isSpiraling = false;
+        this.reset(false);
+      } else {
+        this.x = W/2 + Math.cos(this.spiralAngle) * this.spiralR;
+        this.y = H/2 + Math.sin(this.spiralAngle) * this.spiralR;
+      }
+      return;
+    }
+
+    const fo = this.floatOffset;
+    const tx = this.tx + Math.sin(time * 0.5 + fo) * 4;
+    const ty = this.ty + Math.cos(time * 0.4 + fo) * 3;
+    this.vx += (tx - this.x) * 0.055;
+    this.vy += (ty - this.y) * 0.055;
+    this.vx *= 0.8;
+    this.vy *= 0.8;
+    this.x  += this.vx;
+    this.y  += this.vy;
+  }
+}
+
+// ── Batch drawing — one path per colour group isn't feasible,
+//    so we at least skip shadowBlur entirely and use globalAlpha ──
+function drawAll() {
+  const n = particles.length;
+
+  // Draw trails in one pass — group by hue band to minimise fillStyle changes?
+  // Simpler: just loop but avoid save/restore and shadowBlur
+  for (let i = 0; i < n; i++) {
+    const p  = particles[i];
+    const tl = p.trail;
+    const tlen = tl.length;
+    if (tlen < 2) continue;
+
+    for (let j = 1; j < tlen; j++) {
+      const alpha = (j / tlen) * 0.3;
+      const r     = p.size * (j / tlen) * 0.7;
+      if (r < 0.15) continue;
+      ctx.globalAlpha = alpha;
+      ctx.fillStyle   = `hsl(${p.hue},100%,75%)`;
+      ctx.beginPath();
+      ctx.arc(tl[j].x, tl[j].y, r, 0, 6.2832);
+      ctx.fill();
+    }
+  }
+
+  // Draw heads in one pass using glow sprite (no shadowBlur)
+  const gs = glowSize;
+  const gd = gs * 2;
+  for (let i = 0; i < n; i++) {
+    const p = particles[i];
+    // Soft glow via sprite (cheap blit)
+    ctx.globalAlpha = 0.55;
+    ctx.drawImage(glowSprite, p.x - gs, p.y - gs, gd, gd);
+    // Bright core dot
+    ctx.globalAlpha = 1;
+    ctx.fillStyle   = `hsl(${p.hue},100%,92%)`;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, p.size, 0, 6.2832);
+    ctx.fill();
+  }
+
+  ctx.globalAlpha = 1;
+}
+
+// ── Animation loop ────────────────────────────────────────────
+function animate() {
+  animId = requestAnimationFrame(animate);
+  t += 0.016;
+
+  // Fade trail
+  ctx.fillStyle = 'rgba(0,0,2,0.15)';
+  ctx.fillRect(0, 0, W, H);
+
+  // Subtle centre glow (cheap gradient, only when not mobile)
+  if (!isMobile) {
+    const grad = ctx.createRadialGradient(W/2, H/2, 0, W/2, H/2, Math.min(W,H)*0.35);
+    grad.addColorStop(0, 'rgba(100,50,200,0.025)');
+    grad.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, W, H);
+  }
+
+  for (let i = 0; i < particles.length; i++) particles[i].update(t);
+  drawAll();
+}
+
+// ── Init / resize ─────────────────────────────────────────────
+function init() {
+  buildGlowSprite();
+  particles = Array.from({ length: NUM }, (_, i) => new Star(i, NUM));
+}
+
+function resize() {
+  W = canvas.width  = window.innerWidth;
+  H = canvas.height = window.innerHeight;
+  init();
+}
+
+function trigger() {
+  for (let i = 0; i < particles.length; i++) particles[i].triggerSpiral();
+}
+
+// ── Events ────────────────────────────────────────────────────
+let resizeTimer;
+window.addEventListener('resize', () => {
+  clearTimeout(resizeTimer);
+  resizeTimer = setTimeout(resize, 150);
+});
+window.addEventListener('orientationchange', () => setTimeout(resize, 300));
+
+canvas.addEventListener('touchstart', e => e.preventDefault(), { passive: false });
+canvas.addEventListener('touchend',   e => { e.preventDefault(); trigger(); }, { passive: false });
+canvas.addEventListener('click', trigger);
+
+resize();
+animate();
+</script>
+</body>
+</html>
